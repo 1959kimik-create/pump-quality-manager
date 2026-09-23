@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>펌프 공정품질현황 관리</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <?!= include("Stylesheet"); ?>
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <div class="brand">
+          <div class="brand-mark">PQ</div>
+          <div>
+            <h1>펌프 공정품질현황 관리</h1>
+            <p>모델별 검사기준 적용 · 자동 판정 · 공정능력 보고서</p>
+          </div>
+        </div>
+        <nav class="nav-tabs" id="nav">
+          <button data-page="inspect" class="active">검사입력</button>
+          <button data-page="reports">품질보고서</button>
+          <button data-page="specs">기준정보</button>
+        </nav>
+      </header>
+      <main id="page"></main>
+    </div>
+    <div id="modal-root"></div>
+    <div id="toast-root"></div>
+    <div id="report-print-root"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <?!= include("JavaScript"); ?>
+  </body>
+</html>

@@ -1,0 +1,1797 @@
+<script>
+const STORAGE_KEYS = {
+  specs: "pump_spec_v1",
+  inspections: "pump_inspections_v1",
+  config: "pump_config_v1",
+};
+
+const DEFAULT_SPECS = [
+  {
+    id: "spec-model-a",
+    modelName: "MODEL_A",
+    currentLsl: 1.2,
+    currentUsl: 1.8,
+    powerLsl: 250,
+    powerUsl: 350,
+    flowLsl: 10,
+    flowUsl: 15,
+    active: true,
+    createdAt: "2026-09-01",
+    updatedAt: "2026-09-01",
+  },
+  {
+    id: "spec-model-b",
+    modelName: "MODEL_B",
+    currentLsl: 1.5,
+    currentUsl: 2.1,
+    powerLsl: 300,
+    powerUsl: 400,
+    flowLsl: 12,
+    flowUsl: 18,
+    active: true,
+    createdAt: "2026-09-01",
+    updatedAt: "2026-09-01",
+  },
+  {
+    id: "spec-model-c",
+    modelName: "MODEL_C",
+    currentLsl: 2.0,
+    currentUsl: 2.5,
+    powerLsl: 400,
+    powerUsl: 500,
+    flowLsl: 15,
+    flowUsl: 20,
+    active: true,
+    createdAt: "2026-09-01",
+    updatedAt: "2026-09-01",
+  },
+];
+
+const DEFAULT_CONFIG = {
+  companyName: "펌프 공정품질 관리",
+  reportTitle: "펌프 공정 품질현황",
+  emailRecipient: "kik1959@naver.com",
+  currentDecimals: 2,
+  powerDecimals: 2,
+  flowDecimals: 1,
+  defectRateDecimals: 4,
+  minSamplesForCpk: 5,
+};
+
+function readJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+const googleData = {
+  ready: false,
+  specs: null,
+  inspections: null,
+};
+
+function isGas() {
+  return typeof google !== "undefined" && google.script && google.script.run;
+}
+
+function loadGoogleData(callback) {
+  if (!isGas()) {
+    callback();
+    return;
+  }
+  google.script.run
+    .withSuccessHandler(function (data) {
+      googleData.ready = true;
+      googleData.specs = (data.specs || []).map(function (item) {
+        return Object.assign({ id: item.id || "spec-" + item.modelName }, item);
+      });
+      googleData.inspections = data.inspections || [];
+      callback();
+    })
+    .withFailureHandler(function (error) {
+      console.error(error);
+      callback();
+    })
+    .getAppBootstrap();
+}
+
+function runGas(name, payload, onDone) {
+  if (!isGas()) return;
+  const runner = google.script.run
+    .withFailureHandler(function (error) {
+      console.error(error);
+    });
+  if (onDone) runner.withSuccessHandler(onDone);
+  runner[name](payload);
+}
+
+function todayIso() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function getConfig() {
+  const saved = readJson(STORAGE_KEYS.config, null);
+  return { ...DEFAULT_CONFIG, ...(saved || {}) };
+}
+
+function saveConfig(partial) {
+  const next = { ...getConfig(), ...partial };
+  writeJson(STORAGE_KEYS.config, next);
+  return next;
+}
+
+function getSpecs(includeInactive = false) {
+  if (googleData.specs) {
+    return includeInactive ? googleData.specs : googleData.specs.filter((item) => item.active);
+  }
+  let specs = readJson(STORAGE_KEYS.specs, null);
+  if (!specs) {
+    specs = DEFAULT_SPECS;
+    writeJson(STORAGE_KEYS.specs, specs);
+  }
+  return includeInactive ? specs : specs.filter((item) => item.active);
+}
+
+function getSpecByModel(modelName) {
+  return getSpecs(true).find((item) => item.modelName === modelName) || null;
+}
+
+function upsertSpec(payload) {
+  const specs = getSpecs(true);
+  const name = payload.modelName.trim();
+  const now = todayIso();
+  const existing = specs.find((item) => item.modelName === name);
+
+  if (existing && existing.id !== payload.id) {
+    throw new Error("이미 등록된 모델명입니다.");
+  }
+
+  if (payload.id) {
+    const index = specs.findIndex((item) => item.id === payload.id);
+    if (index < 0) throw new Error("수정할 모델을 찾을 수 없습니다.");
+    specs[index] = {
+      ...specs[index],
+      ...payload,
+      modelName: name,
+      updatedAt: now,
+    };
+  } else {
+    specs.push({
+      id: `spec-${Date.now()}`,
+      modelName: name,
+      currentLsl: Number(payload.currentLsl),
+      currentUsl: Number(payload.currentUsl),
+      powerLsl: Number(payload.powerLsl),
+      powerUsl: Number(payload.powerUsl),
+      flowLsl: Number(payload.flowLsl),
+      flowUsl: Number(payload.flowUsl),
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  writeJson(STORAGE_KEYS.specs, specs);
+  googleData.specs = specs;
+  runGas("upsertPumpSpec", {
+    modelName: name,
+    currentLsl: payload.currentLsl,
+    currentUsl: payload.currentUsl,
+    powerLsl: payload.powerLsl,
+    powerUsl: payload.powerUsl,
+    flowLsl: payload.flowLsl,
+    flowUsl: payload.flowUsl,
+    active: true,
+  }, function (next) {
+    googleData.specs = next;
+  });
+  return specs;
+}
+
+function setSpecActive(id, active) {
+  const specs = getSpecs(true);
+  const target = specs.find((item) => item.id === id);
+  if (!target) throw new Error("모델을 찾을 수 없습니다.");
+  target.active = active;
+  target.updatedAt = todayIso();
+  writeJson(STORAGE_KEYS.specs, specs);
+  googleData.specs = specs;
+  runGas("setPumpSpecActive", { modelName: target.modelName, active: active }, function (next) {
+    googleData.specs = next;
+  });
+  return specs;
+}
+
+function snapshotSpec(spec) {
+  return {
+    modelName: spec.modelName,
+    currentLsl: spec.currentLsl,
+    currentUsl: spec.currentUsl,
+    powerLsl: spec.powerLsl,
+    powerUsl: spec.powerUsl,
+    flowLsl: spec.flowLsl,
+    flowUsl: spec.flowUsl,
+  };
+}
+
+function getInspections() {
+  if (googleData.inspections) return googleData.inspections;
+  return readJson(STORAGE_KEYS.inspections, []);
+}
+
+function getInspectionById(id) {
+  return getInspections().find((item) => item.id === id) || null;
+}
+
+function getInspectionBySheet(sheetName) {
+  return getInspections().find((item) => item.sheetName === sheetName) || null;
+}
+
+function makeSheetName(modelName, yyyymmdd) {
+  return `${modelName}_${yyyymmdd}`;
+}
+
+function summarizeSamples(samples) {
+  const total = samples.length;
+  const ng = samples.filter((sample) => sample.result === "NG").length;
+  return {
+    total,
+    ng,
+    ok: total - ng,
+    defectRate: total ? (ng / total) * 100 : 0,
+  };
+}
+
+function saveInspection(record) {
+  const inspections = getInspections();
+  const existingIndex = inspections.findIndex((item) => item.sheetName === record.sheetName);
+
+  if (existingIndex >= 0) {
+    const existing = inspections[existingIndex];
+    const startNo = existing.samples.length;
+    const appended = record.samples.map((sample, index) => ({
+      ...sample,
+      no: startNo + index + 1,
+    }));
+    existing.samples = [...existing.samples, ...appended];
+    existing.summary = summarizeSamples(existing.samples);
+    existing.updatedAt = new Date().toISOString();
+    inspections[existingIndex] = existing;
+    writeJson(STORAGE_KEYS.inspections, inspections);
+    googleData.inspections = inspections;
+    runGas("saveInspectionData", {
+      modelName: record.modelName,
+      date: record.date,
+      dateDisplay: record.dateDisplay,
+      spec: record.spec,
+      samples: appended,
+    });
+    return { inspection: existing, appended: true };
+  }
+
+  const created = {
+    ...record,
+    id: `insp-${Date.now()}`,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  inspections.unshift(created);
+  writeJson(STORAGE_KEYS.inspections, inspections);
+  googleData.inspections = inspections;
+  runGas("saveInspectionData", {
+    modelName: record.modelName,
+    date: record.date,
+    dateDisplay: record.dateDisplay,
+    spec: record.spec,
+    samples: record.samples,
+  });
+  return { inspection: created, appended: false };
+}
+
+function deleteInspection(id) {
+  const next = getInspections().filter((item) => item.id !== id);
+  writeJson(STORAGE_KEYS.inspections, next);
+  return next;
+}
+
+const CHARACTERISTICS = [
+  { key: "current", label: "전류", unit: "A", lsl: "currentLsl", usl: "currentUsl", decimals: 2 },
+  { key: "power", label: "전력", unit: "W", lsl: "powerLsl", usl: "powerUsl", decimals: 2 },
+  { key: "flow", label: "유량", unit: "ml/min", lsl: "flowLsl", usl: "flowUsl", decimals: 1 },
+];
+
+function toYyyymmdd(year, month, day) {
+  return `${year}${String(month).padStart(2, "0")}${String(day).padStart(2, "0")}`;
+}
+
+function formatDateDisplay(year, month, day) {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function parseYyyymmdd(value) {
+  return {
+    year: Number(value.slice(0, 4)),
+    month: Number(value.slice(4, 6)),
+    day: Number(value.slice(6, 8)),
+  };
+}
+
+function formatNumber(value, decimals) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  return Number(value).toFixed(decimals);
+}
+
+function formatDefectRate(rate, decimals = 4) {
+  if (rate === null || rate === undefined || Number.isNaN(rate)) return "-";
+  return `${Number(rate).toFixed(decimals)}%`;
+}
+
+function isInSpec(value, lsl, usl) {
+  return value >= lsl && value <= usl;
+}
+
+function judgeSample(sample, spec) {
+  const currentOk = isInSpec(sample.current, spec.currentLsl, spec.currentUsl);
+  const powerOk = isInSpec(sample.power, spec.powerLsl, spec.powerUsl);
+  const flowOk = isInSpec(sample.flow, spec.flowLsl, spec.flowUsl);
+  return {
+    ...sample,
+    currentOk,
+    powerOk,
+    flowOk,
+    result: currentOk && powerOk && flowOk ? "OK" : "NG",
+  };
+}
+
+function mean(values) {
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function sampleStdev(values) {
+  if (values.length < 2) return null;
+  const avg = mean(values);
+  const variance = values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function processCapability(values, lsl, usl, minSamples = 5) {
+  const avg = mean(values);
+  const sigma = sampleStdev(values);
+  if (values.length < minSamples || sigma === null || sigma === 0 || avg === null) {
+    return { mean: avg, stdev: sigma, cp: null, cpk: null };
+  }
+  const cp = (usl - lsl) / (6 * sigma);
+  const cpk = Math.min((usl - avg) / (3 * sigma), (avg - lsl) / (3 * sigma));
+  return { mean: avg, stdev: sigma, cp, cpk };
+}
+
+function characteristicStats(samples, spec, minSamples = 5) {
+  return CHARACTERISTICS.map((item) => {
+    const values = samples.map((sample) => sample[item.key]);
+    const ng = samples.filter((sample) => sample[`${item.key}Ok`] === false).length;
+    const capability = processCapability(values, spec[item.lsl], spec[item.usl], minSamples);
+    return {
+      ...item,
+      lsl: spec[item.lsl],
+      usl: spec[item.usl],
+      values,
+      ng,
+      defectRate: samples.length ? (ng / samples.length) * 100 : 0,
+      ...capability,
+    };
+  });
+}
+
+function buildHistogram(values, lsl, usl, binCount = 8) {
+  if (!values.length) {
+    return { bins: [], min: lsl, max: usl };
+  }
+
+  const dataMin = Math.min(...values, lsl);
+  const dataMax = Math.max(...values, usl);
+  const padding = (dataMax - dataMin) * 0.08 || 1;
+  const min = dataMin - padding;
+  const max = dataMax + padding;
+  const width = (max - min) / binCount;
+  const bins = Array.from({ length: binCount }, (_, index) => ({
+    from: min + index * width,
+    to: min + (index + 1) * width,
+    count: 0,
+  }));
+
+  values.forEach((value) => {
+    const rawIndex = Math.floor((value - min) / width);
+    const index = Math.min(Math.max(rawIndex, 0), binCount - 1);
+    bins[index].count += 1;
+  });
+
+  return { bins, min, max };
+}
+
+function drawHistogram(canvas, values, lsl, usl, avg, cssWidth, cssHeight) {
+  if (!canvas || typeof canvas.getContext !== "function") return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = 2;
+  cssWidth = cssWidth || canvas.clientWidth || 560;
+  cssHeight = cssHeight || canvas.clientHeight || 220;
+  canvas.width = cssWidth * dpr;
+  canvas.height = cssHeight * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const pad = { top: 18, right: 16, bottom: 32, left: 36 };
+  const width = cssWidth - pad.left - pad.right;
+  const height = cssHeight - pad.top - pad.bottom;
+  const { bins, min, max } = buildHistogram(values, lsl, usl);
+  const maxCount = Math.max(1, ...bins.map((bin) => bin.count));
+
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+  ctx.fillStyle = "#f8fafc";
+  ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+  ctx.strokeStyle = "#cbd5e1";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, pad.top + height);
+  ctx.lineTo(pad.left + width, pad.top + height);
+  ctx.stroke();
+
+  const barGap = 3;
+  const barWidth = Math.max(4, width / bins.length - barGap);
+
+  bins.forEach((bin, index) => {
+    const x = pad.left + index * (width / bins.length) + barGap / 2;
+    const barHeight = (bin.count / maxCount) * (height - 4);
+    const y = pad.top + height - barHeight;
+    const mid = (bin.from + bin.to) / 2;
+    const inSpec = mid >= lsl && mid <= usl;
+    ctx.fillStyle = inSpec ? "#0f766e" : "#dc2626";
+    ctx.globalAlpha = 0.85;
+    ctx.fillRect(x, y, barWidth, barHeight);
+    ctx.globalAlpha = 1;
+  });
+
+  const xOf = (value) => pad.left + ((value - min) / (max - min)) * width;
+
+  function drawLimit(value, color, label) {
+    const x = xOf(value);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x, pad.top);
+    ctx.lineTo(x, pad.top + height);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = "11px 'Pretendard', 'Noto Sans KR', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(label, x, pad.top - 4);
+  }
+
+  drawLimit(lsl, "#b45309", "LSL");
+  drawLimit(usl, "#b45309", "USL");
+
+  if (avg !== null && avg !== undefined) {
+    drawLimit(avg, "#2563eb", "AVG");
+  }
+
+  ctx.fillStyle = "#64748b";
+  ctx.font = "11px 'Pretendard', 'Noto Sans KR', sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(min.toFixed(2), pad.left, pad.top + height + 18);
+  ctx.textAlign = "right";
+  ctx.fillText(max.toFixed(2), pad.left + width, pad.top + height + 18);
+}
+
+function summarizeInspection(samples) {
+  const total = samples.length;
+  const ng = samples.filter((sample) => sample.result === "NG").length;
+  return {
+    total,
+    ng,
+    ok: total - ng,
+    defectRate: total ? (ng / total) * 100 : 0,
+  };
+}
+
+const page = document.getElementById("page");
+const modalRoot = document.getElementById("modal-root");
+const toastRoot = document.getElementById("toast-root");
+const printRoot = document.getElementById("report-print-root");
+
+function estimateFitRows() {
+  return Math.max(1, Math.floor((window.innerHeight - 220) / 26));
+}
+
+const state = {
+  page: "inspect",
+  inspect: {
+    modelName: "",
+    ...todayParts(),
+    samples: emptySampleRows(),
+  },
+  reportId: null,
+  editingSpecId: null,
+  resizeTimer: null,
+};
+
+function todayParts() {
+  const now = new Date();
+  return {
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    day: now.getDate(),
+  };
+}
+
+function emptySample() {
+  return { current: "", power: "", flow: "" };
+}
+
+function emptySampleRows(count = estimateFitRows()) {
+  return Array.from({ length: count }, emptySample);
+}
+
+function createInspectState() {
+  const specs = getSpecs();
+  const date = todayParts();
+  return {
+    modelName: specs[0]?.modelName || "",
+    ...date,
+    samples: emptySampleRows(),
+  };
+}
+
+function toast(message) {
+  toastRoot.innerHTML = `<div class="toast">${message}</div>`;
+  setTimeout(() => {
+    toastRoot.innerHTML = "";
+  }, 2400);
+}
+
+function closeModal() {
+  modalRoot.innerHTML = "";
+}
+
+function showModal(html) {
+  modalRoot.innerHTML = `<div class="modal-backdrop">${html}</div>`;
+  modalRoot.querySelector("[data-close]")?.addEventListener("click", closeModal);
+}
+
+function parseMeasure(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : NaN;
+}
+
+function currentSpec() {
+  return getSpecByModel(state.inspect.modelName);
+}
+
+function render() {
+  document.body.classList.toggle("is-inspect", state.page === "inspect");
+  document.querySelectorAll("#nav button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.page === state.page);
+  });
+
+  if (state.page === "inspect") {
+    renderInspect();
+    fillInspectRows();
+    focusFirstEmptyField();
+  }
+  if (state.page === "reports") renderReports();
+  if (state.page === "specs") renderSpecs();
+}
+
+function renderInspect() {
+  const specs = getSpecs();
+  const spec = currentSpec();
+  const { year, month, day, modelName, samples } = state.inspect;
+
+  page.innerHTML = `
+    <section class="inspect-layout">
+      <aside class="card card-pad inspect-meta">
+        <div class="field">
+          <label>모델명</label>
+          <select id="model-select">
+            <option value="">모델을 선택하세요</option>
+            ${specs
+              .map(
+                (item) =>
+                  `<option value="${item.modelName}" ${item.modelName === modelName ? "selected" : ""}>${item.modelName}</option>`
+              )
+              .join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>검사일</label>
+          <div class="date-row">
+            ${spinControl("year", year, "년")}
+            ${spinControl("month", String(month).padStart(2, "0"), "월")}
+            ${spinControl("day", String(day).padStart(2, "0"), "일")}
+          </div>
+        </div>
+        <div class="spec-box">
+          <strong>검사 기준</strong>
+          ${
+            spec
+              ? `<ul>
+                  <li>전류 [A] <span>${formatNumber(spec.currentLsl, 2)} ~ ${formatNumber(spec.currentUsl, 2)}</span></li>
+                  <li>전력 [W] <span>${formatNumber(spec.powerLsl, 2)} ~ ${formatNumber(spec.powerUsl, 2)}</span></li>
+                  <li>유량 [ml/min] <span>${formatNumber(spec.flowLsl, 1)} ~ ${formatNumber(spec.flowUsl, 1)}</span></li>
+                </ul>`
+              : `<p class="hint">모델을 선택하면 기준값이 자동으로 표시됩니다.</p>`
+          }
+        </div>
+      </aside>
+      <section class="card card-pad inspect-samples">
+        <div class="sample-table" id="sample-list">
+          <div class="sample-row sample-row-head">
+            <span>시료번호</span>
+            <span>전류측정치 [A]</span>
+            <span>전력측정치 [W]</span>
+            <span>유량측정치 [ml/min]</span>
+            <span>판정</span>
+          </div>
+          ${samples.map((sample, index) => sampleCard(sample, index, spec)).join("")}
+        </div>
+        <div class="sticky-actions">
+          <button class="btn btn-ghost" id="add-sample">시료 추가</button>
+          <button class="btn btn-primary btn-large" id="complete-input">입력완료</button>
+        </div>
+      </section>
+    </section>
+  `;
+
+  bindInspectEvents();
+}
+
+function countFitRows() {
+  const table = document.querySelector(".sample-table");
+  if (!table) return estimateFitRows();
+  const head = table.querySelector(".sample-row-head");
+  const row = table.querySelector(".sample-card");
+  const rowHeight = Math.max(20, Math.round(row?.getBoundingClientRect().height || 26));
+  const headHeight = Math.ceil(head?.getBoundingClientRect().height || 16);
+  const available = table.clientHeight - headHeight;
+  return Math.max(1, Math.floor((available - 1) / rowHeight));
+}
+
+function padSampleRowsToFit() {
+  const fit = countFitRows();
+  if (state.inspect.samples.length >= fit) return false;
+  while (state.inspect.samples.length < fit) {
+    state.inspect.samples.push(emptySample());
+  }
+  return true;
+}
+
+function fillInspectRows() {
+  if (padSampleRowsToFit()) renderInspect();
+}
+
+function spinControl(name, value, suffix) {
+  return `
+    <div class="spin">
+      <input id="${name}-input" value="${value}" inputmode="numeric" aria-label="${suffix}" />
+      <span class="spin-unit">${suffix}</span>
+      <div class="spin-btns">
+        <button type="button" data-spin="${name}" data-dir="1">▲</button>
+        <button type="button" data-spin="${name}" data-dir="-1">▼</button>
+      </div>
+    </div>
+  `;
+}
+
+function liveJudge(sample, spec) {
+  const current = parseMeasure(sample.current);
+  const power = parseMeasure(sample.power);
+  const flow = parseMeasure(sample.flow);
+  if (!spec || [current, power, flow].some((value) => value === null || Number.isNaN(value))) {
+    return null;
+  }
+  return judgeSample({ current, power, flow }, spec);
+}
+
+function sampleCard(sample, index, spec) {
+  const judged = liveJudge(sample, spec);
+  const badge = judged
+    ? `<span class="badge ${judged.result === "OK" ? "ok" : "ng"}">${judged.result}</span>`
+    : `<span class="badge wait">입력중</span>`;
+
+  return `
+    <article class="sample-card sample-row" data-index="${index}">
+      <strong class="sample-no">${index + 1}</strong>
+      ${measureField(index, "current", "전류측정치", "A", sample.current, judged?.currentOk)}
+      ${measureField(index, "power", "전력측정치", "W", sample.power, judged?.powerOk)}
+      ${measureField(index, "flow", "유량측정치", "ml/min", sample.flow, judged?.flowOk)}
+      <div class="sample-result">${badge}</div>
+    </article>
+  `;
+}
+
+function measureField(index, key, label, unit, value, ok) {
+  const klass = ok === false ? "ng" : "";
+  return `
+    <input
+      data-sample="${index}"
+      data-key="${key}"
+      value="${value}"
+      inputmode="decimal"
+      enterkeyhint="next"
+      aria-label="시료 ${index + 1} ${label} (${unit})"
+      class="${klass}"
+    />
+  `;
+}
+
+function clampDate() {
+  const inspect = state.inspect;
+  inspect.month = Math.min(12, Math.max(1, inspect.month));
+  const lastDay = new Date(inspect.year, inspect.month, 0).getDate();
+  inspect.day = Math.min(lastDay, Math.max(1, inspect.day));
+}
+
+function bindInspectEvents() {
+  document.getElementById("model-select").addEventListener("change", (event) => {
+    state.inspect.modelName = event.target.value;
+    renderInspect();
+    fillInspectRows();
+  });
+
+  document.querySelectorAll("[data-spin]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const field = button.dataset.spin;
+      const dir = Number(button.dataset.dir);
+      state.inspect[field] += dir;
+      if (field === "year") state.inspect.year = Math.max(2000, state.inspect.year);
+      clampDate();
+      renderInspect();
+      fillInspectRows();
+    });
+  });
+
+  ["year", "month", "day"].forEach((field) => {
+    document.getElementById(`${field}-input`).addEventListener("change", (event) => {
+      state.inspect[field] = Number(event.target.value) || state.inspect[field];
+      clampDate();
+      renderInspect();
+      fillInspectRows();
+    });
+  });
+
+  document.querySelectorAll("[data-sample]").forEach((input) => {
+    const persist = (target) => {
+      const index = Number(target.dataset.sample);
+      const key = target.dataset.key;
+      state.inspect.samples[index][key] = target.value;
+      refreshSampleCard(index);
+      return { index, key, value: target.value };
+    };
+
+    input.addEventListener("input", (event) => {
+      const previous = state.inspect.samples[Number(event.target.dataset.sample)][event.target.dataset.key];
+      const { index, key, value } = persist(event.target);
+      if (isReadyToAdvance(key, value) && !isReadyToAdvance(key, previous) && isSequentialInput(index, key)) {
+        moveToNextField(index, key);
+      }
+    });
+    input.addEventListener("change", (event) => persist(event.target));
+    input.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key !== "Enter" && event.key !== "NumpadEnter") return;
+      event.preventDefault();
+      const { index, key, value } = persist(event.target);
+      if (hasValidNumber(value)) moveToNextField(index, key);
+    });
+  });
+
+  document.getElementById("add-sample").addEventListener("click", () => {
+    syncSamplesFromDom();
+    state.inspect.samples.push(emptySample());
+    renderInspect();
+    focusField(state.inspect.samples.length - 1, "current");
+  });
+
+  document.getElementById("complete-input").addEventListener("click", completeInput);
+}
+
+function syncSamplesFromDom() {
+  document.querySelectorAll("[data-sample]").forEach((input) => {
+    const index = Number(input.dataset.sample);
+    if (!state.inspect.samples[index]) state.inspect.samples[index] = emptySample();
+    state.inspect.samples[index][input.dataset.key] = input.value;
+  });
+}
+
+function refreshSampleCard(index) {
+  const card = document.querySelector(`.sample-card[data-index="${index}"]`);
+  if (!card) return;
+  const judged = liveJudge(state.inspect.samples[index], currentSpec());
+  const badge = card.querySelector(".badge");
+  if (!badge) return;
+  if (!judged) {
+    badge.className = "badge wait";
+    badge.textContent = "입력중";
+  } else {
+    badge.className = `badge ${judged.result === "OK" ? "ok" : "ng"}`;
+    badge.textContent = judged.result;
+  }
+  ["current", "power", "flow"].forEach((key) => {
+    const field = card.querySelector(`[data-key="${key}"]`);
+    if (!field) return;
+    const ok = judged ? judged[`${key}Ok`] : undefined;
+    field.classList.toggle("ng", ok === false);
+  });
+}
+
+function hasValidNumber(value) {
+  const number = parseMeasure(value);
+  return number !== null && !Number.isNaN(number);
+}
+
+function isReadyToAdvance(key, value) {
+  const trimmed = String(value ?? "").trim();
+  if (!hasValidNumber(trimmed)) return false;
+  if (key === "current") return /^-?\d+\.\d{2}$/.test(trimmed);
+  if (key === "flow") return /^-?\d+\.\d{1}$/.test(trimmed);
+  if (key === "power") return /^-?\d+\.\d{2}$/.test(trimmed) || /^-?\d{3,}$/.test(trimmed);
+  return false;
+}
+
+function isSequentialInput(index, key) {
+  const sample = state.inspect.samples[index];
+  if (key === "current") return String(sample.power).trim() === "";
+  if (key === "power") return String(sample.flow).trim() === "";
+  if (key === "flow") {
+    const next = state.inspect.samples[index + 1];
+    return !next || ["current", "power", "flow"].every((item) => String(next[item]).trim() === "");
+  }
+  return false;
+}
+
+function focusField(index, key, align = "nearest") {
+  const tryFocus = () => {
+    const field = document.querySelector(`[data-sample="${index}"][data-key="${key}"]`);
+    if (!field) return false;
+    field.focus();
+    field.select();
+    field.scrollIntoView({ block: align, inline: "nearest" });
+    return true;
+  };
+
+  if (tryFocus()) return;
+  requestAnimationFrame(() => {
+    if (!tryFocus()) setTimeout(tryFocus, 0);
+  });
+}
+
+function focusFirstEmptyField() {
+  const samples = state.inspect.samples;
+  for (let index = 0; index < samples.length; index += 1) {
+    for (const key of ["current", "power", "flow"]) {
+      if (String(samples[index][key]).trim() === "") {
+        focusField(index, key);
+        return;
+      }
+    }
+  }
+}
+
+function moveToNextField(index, key) {
+  const order = ["current", "power", "flow"];
+  const nextKey = order[order.indexOf(key) + 1];
+  if (nextKey) {
+    focusField(index, nextKey);
+    return;
+  }
+
+  syncSamplesFromDom();
+  if (index === state.inspect.samples.length - 1) {
+    state.inspect.samples.push(emptySample());
+    renderInspect();
+    focusField(index + 1, "current", "end");
+    return;
+  }
+  focusField(index + 1, "current");
+}
+
+function validateSamples() {
+  if (!state.inspect.modelName) return "검사할 펌프 모델을 선택해주세요.";
+  if (!state.inspect.year || !state.inspect.month || !state.inspect.day) {
+    return "검사일을 선택해주세요.";
+  }
+
+  const filled = state.inspect.samples.filter((sample) =>
+    [sample.current, sample.power, sample.flow].some((value) => String(value).trim() !== "")
+  );
+  if (!filled.length) return "검사 데이터를 입력해주세요.";
+
+  for (const [index, sample] of filled.entries()) {
+    for (const [key, label] of [
+      ["current", "전류"],
+      ["power", "전력"],
+      ["flow", "유량"],
+    ]) {
+      if (String(sample[key]).trim() === "") {
+        return `시료 ${index + 1}의 ${label}값을 입력해주세요.`;
+      }
+      if (Number.isNaN(parseMeasure(sample[key]))) {
+        return "전류/전력/유량은 숫자로 입력해주세요.";
+      }
+    }
+  }
+
+  const incomplete = state.inspect.samples.filter((sample) => {
+    const values = [sample.current, sample.power, sample.flow].map((value) => String(value).trim());
+    const filledCount = values.filter(Boolean).length;
+    return filledCount > 0 && filledCount < 3;
+  });
+  if (incomplete.length) {
+    return "유량까지 입력되지 않은 시료가 있습니다.";
+  }
+
+  return "";
+}
+
+function judgedSamples() {
+  const spec = currentSpec();
+  return state.inspect.samples
+    .filter((sample) => [sample.current, sample.power, sample.flow].some((value) => String(value).trim() !== ""))
+    .map((sample, index) =>
+      judgeSample(
+        {
+          no: index + 1,
+          current: parseMeasure(sample.current),
+          power: parseMeasure(sample.power),
+          flow: parseMeasure(sample.flow),
+        },
+        spec
+      )
+    );
+}
+
+function completeInput() {
+  syncSamplesFromDom();
+  const error = validateSamples();
+  if (error) {
+    toast(error);
+    return;
+  }
+
+  const samples = judgedSamples();
+  const summary = summarizeInspection(samples);
+  const spec = currentSpec();
+  const dateText = formatDateDisplay(state.inspect.year, state.inspect.month, state.inspect.day);
+
+  showModal(`
+    <div class="modal">
+      <h3>검사결과를 저장하시겠습니까?</h3>
+      <p class="hint">모델명 : ${spec.modelName}<br>검사일 : ${dateText}<br>총 검사수 : ${summary.total}<br>예상 불량수 : ${summary.ng}</p>
+      <div class="actions">
+        <button class="btn btn-ghost" data-close>취소</button>
+        <button class="btn btn-primary" id="confirm-save">저장</button>
+      </div>
+    </div>
+  `);
+
+  document.getElementById("confirm-save").addEventListener("click", () => {
+    try {
+      persistInspection(samples, summary, spec);
+    } catch {
+      toast("데이터 저장 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+    }
+  });
+}
+
+function persistInspection(samples, summary, spec) {
+  const yyyymmdd = toYyyymmdd(state.inspect.year, state.inspect.month, state.inspect.day);
+  const dateText = formatDateDisplay(state.inspect.year, state.inspect.month, state.inspect.day);
+  const { inspection, appended } = saveInspection({
+    sheetName: makeSheetName(spec.modelName, yyyymmdd),
+    modelName: spec.modelName,
+    date: yyyymmdd,
+    dateDisplay: dateText,
+    spec: snapshotSpec(spec),
+    samples,
+    summary,
+  });
+
+  closeModal();
+  state.reportId = inspection.id;
+  state.inspect.samples = emptySampleRows();
+  if (state.page === "inspect") {
+    renderInspect();
+    fillInspectRows();
+    focusFirstEmptyField();
+  }
+
+  showModal(`
+    <div class="modal">
+      <h3>검사결과 저장이 완료되었습니다.</h3>
+      <p class="hint">
+        모델명 : ${inspection.modelName}<br>
+        검사일 : ${inspection.dateDisplay}<br>
+        검사수 : ${inspection.summary.total}<br>
+        불량수 : ${inspection.summary.ng}<br>
+        불량율 : ${formatDefectRate(inspection.summary.defectRate)}<br>
+        ${appended ? "같은 모델/날짜 결과에 이어서 저장했습니다." : ""}
+      </p>
+      <div class="actions">
+        <button class="btn btn-ghost" data-close>계속 입력</button>
+        <button class="btn btn-teal" id="go-report">보고서출력</button>
+      </div>
+    </div>
+  `);
+
+  document.getElementById("go-report").addEventListener("click", () => {
+    closeModal();
+    state.page = "reports";
+    render();
+  });
+}
+
+function renderReports() {
+  const inspections = getInspections();
+  if (!state.reportId && inspections[0]) state.reportId = inspections[0].id;
+  const selected = getInspectionById(state.reportId);
+
+  page.innerHTML = `
+    <section class="page-grid">
+      <aside class="card card-pad">
+        <h2>저장된 검사결과</h2>
+        <div class="report-list">
+          ${
+            inspections.length
+              ? inspections
+                  .map(
+                    (item) => `
+                      <button class="report-item ${item.id === state.reportId ? "active" : ""}" data-report="${item.id}">
+                        <strong>${item.modelName}</strong><br>
+                        <small>${item.dateDisplay} · ${item.sheetName}</small><br>
+                        <small>검사 ${item.summary.total} / 불량 ${item.summary.ng} / ${formatDefectRate(item.summary.defectRate)}</small>
+                      </button>
+                    `
+                  )
+                  .join("")
+              : `<div class="empty">저장된 검사결과가 없습니다.</div>`
+          }
+        </div>
+      </aside>
+      <section class="card card-pad" id="report-view"></section>
+    </section>
+  `;
+
+  document.querySelectorAll("[data-report]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.reportId = button.dataset.report;
+      renderReports();
+    });
+  });
+
+  renderReportView(selected);
+}
+
+function reportViewHtml(inspection, withCanvas = true) {
+  const config = getConfig();
+  const stats = characteristicStats(inspection.samples, inspection.spec, config.minSamplesForCpk);
+  return `
+    <div class="report-toolbar no-print">
+      <div>
+        <h2>${inspection.modelName} 공정 품질현황</h2>
+        <p class="hint">검사일 ${inspection.dateDisplay} · ${inspection.sheetName}</p>
+      </div>
+      <div class="actions no-print">
+        <button class="btn btn-teal" data-action="pdf">저장</button>
+        <button class="btn btn-ghost" data-action="print">인쇄</button>
+        <button class="btn btn-primary" data-action="email">메일</button>
+      </div>
+    </div>
+    <div class="summary-grid">
+      <div class="stat"><span>총 검사수</span><b>${inspection.summary.total}</b></div>
+      <div class="stat"><span>정상수</span><b>${inspection.summary.ok}</b></div>
+      <div class="stat"><span>불량수</span><b>${inspection.summary.ng}</b></div>
+      <div class="stat"><span>불량율</span><b>${formatDefectRate(inspection.summary.defectRate)}</b></div>
+    </div>
+    ${stats
+      .map(
+        (item) => `
+          <article class="hist-card">
+            <h3>${item.label} 품질분석</h3>
+            <p class="hint">하한 ${formatNumber(item.lsl, item.decimals)} / 상한 ${formatNumber(item.usl, item.decimals)} ${item.unit} · 평균 ${formatCapability(item.mean, item.decimals)} · 표준편차 ${formatCapability(item.stdev, item.decimals)}</p>
+            ${withCanvas ? `<canvas data-hist="${item.key}"></canvas>` : ""}
+          </article>
+        `
+      )
+      .join("")}
+    <article class="hist-card">
+      <h3>공정능력 분석</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="left">특성치</th><th>하한</th><th>상한</th><th>평균</th><th>표준편차</th><th>Cp</th><th>Cpk</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${stats
+              .map(
+                (item) => `
+                  <tr>
+                    <td class="left">${item.label}</td>
+                    <td>${formatNumber(item.lsl, item.decimals)}</td>
+                    <td>${formatNumber(item.usl, item.decimals)}</td>
+                    <td>${formatCapability(item.mean, item.decimals)}</td>
+                    <td>${formatCapability(item.stdev, item.decimals)}</td>
+                    <td>${formatCapability(item.cp, 3)}</td>
+                    <td>${formatCapability(item.cpk, 3)}</td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </article>
+    <article class="hist-card">
+      <h3>특성치별 불량율</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th class="left">특성치</th><th>불량수</th><th>불량율</th></tr></thead>
+          <tbody>
+            ${stats
+              .map(
+                (item) => `
+                  <tr>
+                    <td class="left">${item.label}</td>
+                    <td>${item.ng}</td>
+                    <td>${formatDefectRate(item.defectRate)}</td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </article>
+    <article class="hist-card" data-section="results">
+      <h3>검사결과</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>시료번호</th><th>전류치</th><th>전력치</th><th>유량</th><th>판정</th></tr>
+          </thead>
+          <tbody>
+            ${inspection.samples
+              .map(
+                (sample) => `
+                  <tr>
+                    <td>${sample.no}</td>
+                    <td>${formatNumber(sample.current, 2)}</td>
+                    <td>${formatNumber(sample.power, 2)}</td>
+                    <td>${formatNumber(sample.flow, 1)}</td>
+                    <td><span class="badge ${sample.result === "OK" ? "ok" : "ng"}">${sample.result}</span></td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  `;
+}
+
+function formatCapability(value, decimals) {
+  return value === null || value === undefined ? "N/A" : formatNumber(value, decimals);
+}
+
+function renderReportView(inspection) {
+  const view = document.getElementById("report-view");
+  if (!inspection) {
+    view.innerHTML = `<div class="empty">보고서를 보려면 검사결과를 먼저 저장하세요.</div>`;
+    return;
+  }
+
+  view.innerHTML = reportViewHtml(inspection);
+  paintHistograms(view, inspection);
+  view.querySelector("[data-action='pdf']").addEventListener("click", () => savePdf(inspection));
+  view.querySelector("[data-action='print']").addEventListener("click", () => printReport(inspection));
+  view.querySelector("[data-action='email']").addEventListener("click", () => emailReport(inspection));
+}
+
+function paintHistograms(root, inspection) {
+  const stats = characteristicStats(inspection.samples, inspection.spec, getConfig().minSamplesForCpk);
+  stats.forEach((item) => {
+    const canvas =
+      root.querySelector(`[data-hist="${item.key}"]`) ||
+      root.querySelector(`[data-print-hist="${item.key}"]`);
+    if (canvas) drawHistogram(canvas, item.values, item.lsl, item.usl, item.mean);
+  });
+}
+
+function printDocument(inspection) {
+  const config = getConfig();
+  const stats = characteristicStats(inspection.samples, inspection.spec, config.minSamplesForCpk);
+  printRoot.innerHTML = `
+    <section class="print-page">
+      <h1 style="margin:0 0 8px">${inspection.modelName} 공정 품질현황</h1>
+      <p>펌프 공정 품질현황 · 모델명 ${inspection.modelName} · 검사일 ${inspection.dateDisplay}</p>
+      <table>
+        <thead><tr><th>총 검사수</th><th>정상수</th><th>불량수</th><th>불량율</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>${inspection.summary.total}</td>
+            <td>${inspection.summary.ok}</td>
+            <td>${inspection.summary.ng}</td>
+            <td>${formatDefectRate(inspection.summary.defectRate)}</td>
+          </tr>
+        </tbody>
+      </table>
+      ${stats
+        .map(
+          (item) => `
+            <h3>${item.label} Histogram</h3>
+            <canvas data-print-hist="${item.key}" style="width:100%;height:190px"></canvas>
+          `
+        )
+        .join("")}
+    </section>
+    <section class="print-page">
+      <h2>공정능력 분석</h2>
+      <table>
+        <thead>
+          <tr><th>특성치</th><th>하한</th><th>상한</th><th>평균</th><th>표준편차</th><th>Cp</th><th>Cpk</th></tr>
+        </thead>
+        <tbody>
+          ${stats
+            .map(
+              (item) => `
+                <tr>
+                  <td>${item.label}</td>
+                  <td>${formatNumber(item.lsl, item.decimals)}</td>
+                  <td>${formatNumber(item.usl, item.decimals)}</td>
+                  <td>${formatCapability(item.mean, item.decimals)}</td>
+                  <td>${formatCapability(item.stdev, item.decimals)}</td>
+                  <td>${formatCapability(item.cp, 3)}</td>
+                  <td>${formatCapability(item.cpk, 3)}</td>
+                </tr>
+              `
+            )
+            .join("")}
+        </tbody>
+      </table>
+      <h3>특성치별 불량율</h3>
+      <table>
+        <thead><tr><th>특성치</th><th>불량수</th><th>불량율</th></tr></thead>
+        <tbody>
+          ${stats
+            .map((item) => `<tr><td>${item.label}</td><td>${item.ng}</td><td>${formatDefectRate(item.defectRate)}</td></tr>`)
+            .join("")}
+        </tbody>
+      </table>
+    </section>
+  `;
+  paintHistograms(printRoot, inspection);
+}
+
+function printReport(inspection) {
+  printDocument(inspection);
+  window.print();
+}
+
+function waitFrames(count = 2) {
+  return new Promise((resolve) => {
+    const step = (left) => {
+      if (left <= 0) {
+        resolve();
+        return;
+      }
+      requestAnimationFrame(() => step(left - 1));
+    };
+    step(count);
+  });
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function gasErrorMessage(error) {
+  const text = String((error && (error.message || error)) || "");
+  if (/Authorization|authoriz|승인|권한이 필요/i.test(text)) {
+    return "앱 권한이 아직 허용되지 않았습니다. Apps Script 편집기에서 authorizeOnce를 실행해 승인한 뒤, 새 버전으로 다시 배포하세요.";
+  }
+  return text || "처리 중 오류가 발생했습니다.";
+}
+
+function runGasAsync(name, payload) {
+  return new Promise((resolve, reject) => {
+    if (typeof isGas !== "function" || !isGas()) {
+      reject(new Error("gas"));
+      return;
+    }
+    google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler((error) => reject(error))
+      [name](payload);
+  });
+}
+
+function downloadBase64Pdf(filename, base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function fillRoundRect(ctx, x, y, w, h, r, color) {
+  ctx.beginPath();
+  if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, w, h, r);
+  else ctx.rect(x, y, w, h);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function drawTable(ctx, x, y, width, headers, rows, colWidths) {
+  const rowH = 28;
+  const headerH = 30;
+  fillRoundRect(ctx, x, y, width, headerH, 6, "#12324d");
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 12px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  let cx = x;
+  headers.forEach((header, i) => {
+    ctx.fillText(header, cx + colWidths[i] / 2, y + headerH / 2);
+    cx += colWidths[i];
+  });
+  rows.forEach((row, rowIndex) => {
+    const ry = y + headerH + rowIndex * rowH;
+    ctx.fillStyle = rowIndex % 2 ? "#f8fafc" : "#ffffff";
+    ctx.fillRect(x, ry, width, rowH);
+    ctx.strokeStyle = "#d7e0e8";
+    ctx.strokeRect(x, ry, width, rowH);
+    ctx.fillStyle = "#163047";
+    ctx.font = "12px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+    cx = x;
+    row.forEach((cell, i) => {
+      ctx.fillText(String(cell), cx + colWidths[i] / 2, ry + rowH / 2);
+      cx += colWidths[i];
+    });
+  });
+  return headerH + rows.length * rowH;
+}
+
+function captureHistogramImages(inspection) {
+  const stats = characteristicStats(inspection.samples, inspection.spec, getConfig().minSamplesForCpk);
+  const images = {};
+  stats.forEach((item) => {
+    const canvas = document.createElement("canvas");
+    drawHistogram(canvas, item.values, item.lsl, item.usl, item.mean, 640, 220);
+    images[item.key] = canvas.toDataURL("image/jpeg", 0.84).split(",")[1] || "";
+  });
+  return images;
+}
+
+function createStyledReportCanvas(inspection, includeResults) {
+  const stats = characteristicStats(inspection.samples, inspection.spec, getConfig().minSamplesForCpk);
+
+  const width = 820;
+  const margin = 28;
+  const inner = width - margin * 2;
+  let height = 200 + stats.length * 300 + 260;
+  if (includeResults) height += 80 + inspection.samples.length * 26;
+
+  const canvas = document.createElement("canvas");
+  const dpr = 2;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("PDF 캔버스를 만들 수 없습니다.");
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#f7fafc";
+  ctx.fillRect(0, 0, width, height);
+  ctx.textBaseline = "alphabetic";
+
+  let y = 36;
+  ctx.fillStyle = "#12324d";
+  ctx.font = "bold 26px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(`${inspection.modelName} 공정 품질현황`, margin, y);
+  y += 28;
+  ctx.fillStyle = "#5b7388";
+  ctx.font = "14px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+  ctx.fillText(`검사일 ${inspection.dateDisplay} · ${inspection.sheetName}`, margin, y);
+  y += 24;
+
+  const boxes = [
+    { label: "총 검사수", value: String(inspection.summary.total), bg: "#e0f2fe" },
+    { label: "정상수", value: String(inspection.summary.ok), bg: "#d1fae5" },
+    { label: "불량수", value: String(inspection.summary.ng), bg: "#fee2e2" },
+    { label: "불량율", value: formatDefectRate(inspection.summary.defectRate), bg: "#ccfbf1" },
+  ];
+  const boxW = (inner - 36) / 4;
+  boxes.forEach((box, i) => {
+    const x = margin + i * (boxW + 12);
+    fillRoundRect(ctx, x, y, boxW, 70, 10, box.bg);
+    ctx.fillStyle = "#5b7388";
+    ctx.font = "12px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(box.label, x + 12, y + 22);
+    ctx.fillStyle = "#12324d";
+    ctx.font = "bold 22px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+    ctx.fillText(box.value, x + 12, y + 52);
+  });
+  y += 90;
+
+  stats.forEach((item) => {
+    const cardH = 286;
+    fillRoundRect(ctx, margin, y, inner, cardH, 14, "#ffffff");
+    ctx.strokeStyle = "#d7e0e8";
+    ctx.strokeRect(margin, y, inner, cardH);
+    ctx.fillStyle = "#12324d";
+    ctx.font = "bold 16px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(`${item.label} 품질분석`, margin + 16, y + 28);
+    ctx.fillStyle = "#5b7388";
+    ctx.font = "12px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+    ctx.fillText(
+      `하한 ${formatNumber(item.lsl, item.decimals)} / 상한 ${formatNumber(item.usl, item.decimals)} ${item.unit} · 평균 ${formatCapability(item.mean, item.decimals)} · 표준편차 ${formatCapability(item.stdev, item.decimals)}`,
+      margin + 16,
+      y + 50
+    );
+    const histCanvas = document.createElement("canvas");
+    drawHistogram(histCanvas, item.values, item.lsl, item.usl, item.mean, inner - 32, 208);
+    ctx.drawImage(histCanvas, margin + 16, y + 62, inner - 32, 208);
+    y += cardH + 14;
+  });
+
+  const capRows = stats.map((item) => [
+    item.label,
+    formatNumber(item.lsl, item.decimals),
+    formatNumber(item.usl, item.decimals),
+    formatCapability(item.mean, item.decimals),
+    formatCapability(item.stdev, item.decimals),
+    formatCapability(item.cp, 3),
+    formatCapability(item.cpk, 3),
+  ]);
+  fillRoundRect(ctx, margin, y, inner, 54 + capRows.length * 28, 14, "#ffffff");
+  ctx.fillStyle = "#12324d";
+  ctx.font = "bold 16px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+  ctx.fillText("공정능력 분석", margin + 16, y + 26);
+  const capW = [90, 90, 90, 100, 110, 80, 80];
+  drawTable(ctx, margin + 16, y + 38, inner - 32, ["특성치", "하한", "상한", "평균", "표준편차", "Cp", "Cpk"], capRows, capW);
+  y += 70 + capRows.length * 28;
+
+  const defectRows = stats.map((item) => [item.label, item.ng, formatDefectRate(item.defectRate)]);
+  fillRoundRect(ctx, margin, y, inner, 54 + defectRows.length * 28, 14, "#ffffff");
+  ctx.fillStyle = "#12324d";
+  ctx.font = "bold 16px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+  ctx.fillText("특성치별 불량율", margin + 16, y + 26);
+  drawTable(ctx, margin + 16, y + 38, inner - 32, ["특성치", "불량수", "불량율"], defectRows, [240, 200, 200]);
+  y += 70 + defectRows.length * 28;
+
+  if (includeResults && inspection.samples.length) {
+    const sampleRows = inspection.samples.map((sample) => [
+      sample.no,
+      formatNumber(sample.current, 2),
+      formatNumber(sample.power, 2),
+      formatNumber(sample.flow, 1),
+      sample.result,
+    ]);
+    const blockH = 54 + sampleRows.length * 28;
+    fillRoundRect(ctx, margin, y, inner, blockH, 14, "#ffffff");
+    ctx.fillStyle = "#12324d";
+    ctx.font = "bold 16px 'Noto Sans KR', 'Malgun Gothic', sans-serif";
+    ctx.fillText("검사결과", margin + 16, y + 26);
+    drawTable(ctx, margin + 16, y + 38, inner - 32, ["시료번호", "전류치", "전력치", "유량", "판정"], sampleRows, [140, 140, 140, 160, 140]);
+  }
+
+  return canvas;
+}
+
+function canvasToPdfBlob(canvas, fileName) {
+  const JsPDF = window.jspdf && window.jspdf.jsPDF;
+  if (!JsPDF || !canvas) return null;
+  const image = canvas.toDataURL("image/jpeg", 0.86);
+  const pdf = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+  const pageWidth = 210;
+  const pageHeight = 297;
+  const margin = 8;
+  const imageWidth = pageWidth - margin * 2;
+  const imageHeight = canvas.height * (imageWidth / canvas.width);
+  let remain = imageHeight;
+  let y = margin;
+  pdf.addImage(image, "JPEG", margin, y, imageWidth, imageHeight);
+  remain -= pageHeight - margin * 2;
+  while (remain > 0) {
+    pdf.addPage();
+    y = margin - (imageHeight - remain);
+    pdf.addImage(image, "JPEG", margin, y, imageWidth, imageHeight);
+    remain -= pageHeight - margin * 2;
+  }
+  pdf.setProperties({ title: fileName });
+  return pdf.output("blob");
+}
+
+async function createReportPdf(inspection, includeResults = false) {
+  const fileName = `${inspection.sheetName}_공정품질.pdf`;
+  const canvas = createStyledReportCanvas(inspection, includeResults);
+  const blob = canvasToPdfBlob(canvas, fileName);
+  if (!blob) throw new Error("PDF 생성에 실패했습니다.");
+  const base64 = await blobToBase64(blob);
+  if (!base64 || blob.size < 2000) throw new Error("empty pdf");
+  return { fileName, blob, base64 };
+}
+
+async function savePdf(inspection) {
+  try {
+    toast("PDF를 만드는 중입니다.");
+    const { fileName, blob } = await createReportPdf(inspection, true);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast(`${fileName} 저장을 시작했습니다.`);
+  } catch (error) {
+    toast(gasErrorMessage(error));
+  }
+}
+
+function emailReport(inspection) {
+  const config = getConfig();
+  const subject = `[펌프 공정품질현황] ${inspection.sheetName}`;
+  const body = [
+    "펌프 공정품질현황 보고서입니다.",
+    "",
+    `모델명 : ${inspection.modelName}`,
+    `검사일 : ${inspection.dateDisplay}`,
+    `총 검사수 : ${inspection.summary.total}`,
+    `불량수 : ${inspection.summary.ng}`,
+    `불량율 : ${formatDefectRate(inspection.summary.defectRate)}`,
+  ].join("\n");
+  const gasReady = typeof isGas === "function" && isGas();
+
+  showModal(`
+    <div class="modal">
+      <h3>보고서 메일 전송</h3>
+      <p class="hint">수신자 : ${config.emailRecipient}</p>
+      <div class="actions">
+        <button class="btn btn-ghost" data-close>취소</button>
+        <button class="btn btn-teal" id="send-mail">${gasReady ? "메일 전송" : "PDF 저장 후 메일열기"}</button>
+      </div>
+    </div>
+  `);
+
+  document.getElementById("send-mail").addEventListener("click", async () => {
+    closeModal();
+    if (!gasReady) {
+      await savePdf(inspection);
+      const url = `mailto:${encodeURIComponent(config.emailRecipient)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+      window.location.href = url;
+      return;
+    }
+
+    try {
+      toast("PDF를 만들어 메일을 보내는 중입니다.");
+      const payload = {
+        recipient: config.emailRecipient,
+        subject: subject,
+        body: body,
+        sheetName: inspection.sheetName,
+        histograms: captureHistogramImages(inspection),
+      };
+      try {
+        const pdf = await createReportPdf(inspection, false);
+        payload.filename = pdf.fileName;
+        payload.pdfBase64 = pdf.base64;
+      } catch (error) {
+        console.error(error);
+      }
+      await runGasAsync("sendReportEmail", payload);
+      toast("메일을 전송했습니다.");
+    } catch (error) {
+      toast(gasErrorMessage(error));
+    }
+  });
+}
+
+function renderSpecs() {
+  const specs = getSpecs(true);
+  const config = getConfig();
+  const editing = specs.find((item) => item.id === state.editingSpecId);
+
+  page.innerHTML = `
+    <section class="page-grid">
+      <aside class="card card-pad">
+        <h2>${editing ? "모델 수정" : "모델 추가"}</h2>
+        <form id="spec-form">
+          <div class="field">
+            <label>모델명</label>
+            <input name="modelName" value="${editing?.modelName || ""}" required />
+          </div>
+          <div class="form-grid">
+            <div class="field"><label>전류 하한</label><input name="currentLsl" value="${editing?.currentLsl ?? ""}" required /></div>
+            <div class="field"><label>전류 상한</label><input name="currentUsl" value="${editing?.currentUsl ?? ""}" required /></div>
+            <div class="field"><label>전력 하한</label><input name="powerLsl" value="${editing?.powerLsl ?? ""}" required /></div>
+            <div class="field"><label>전력 상한</label><input name="powerUsl" value="${editing?.powerUsl ?? ""}" required /></div>
+            <div class="field"><label>유량 하한</label><input name="flowLsl" value="${editing?.flowLsl ?? ""}" required /></div>
+            <div class="field"><label>유량 상한</label><input name="flowUsl" value="${editing?.flowUsl ?? ""}" required /></div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" type="submit">저장</button>
+            ${editing ? `<button class="btn btn-ghost" type="button" id="cancel-edit">취소</button>` : ""}
+          </div>
+        </form>
+        <hr style="border:0;border-top:1px solid var(--line);margin:20px 0">
+        <h3>시스템 설정</h3>
+        <form id="config-form">
+          <div class="field">
+            <label>이메일 수신자</label>
+            <input name="emailRecipient" type="email" value="${config.emailRecipient}" />
+          </div>
+          <button class="btn btn-ghost" type="submit">설정 저장</button>
+        </form>
+      </aside>
+      <section class="card card-pad">
+        <h2>모델/규격 관리</h2>
+        <p class="hint">실제 운영에서는 삭제 대신 사용중지로 과거 검사기록과 연결을 유지합니다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="left">모델명</th>
+                <th>전류</th>
+                <th>전력</th>
+                <th>유량</th>
+                <th>상태</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${specs
+                .map(
+                  (item) => `
+                    <tr>
+                      <td class="left">${item.modelName}</td>
+                      <td>${formatNumber(item.currentLsl, 2)} ~ ${formatNumber(item.currentUsl, 2)}</td>
+                      <td>${formatNumber(item.powerLsl, 2)} ~ ${formatNumber(item.powerUsl, 2)}</td>
+                      <td>${formatNumber(item.flowLsl, 1)} ~ ${formatNumber(item.flowUsl, 1)}</td>
+                      <td>${item.active ? "사용" : "미사용"}</td>
+                      <td>
+                        <div class="actions">
+                          <button class="btn btn-ghost" data-edit="${item.id}">수정</button>
+                          <button class="btn ${item.active ? "btn-danger" : "btn-teal"}" data-toggle="${item.id}">
+                            ${item.active ? "사용중지" : "사용"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  `
+                )
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  `;
+
+  document.getElementById("spec-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const payload = Object.fromEntries(form.entries());
+    try {
+      upsertSpec({
+        id: state.editingSpecId,
+        modelName: payload.modelName,
+        currentLsl: payload.currentLsl,
+        currentUsl: payload.currentUsl,
+        powerLsl: payload.powerLsl,
+        powerUsl: payload.powerUsl,
+        flowLsl: payload.flowLsl,
+        flowUsl: payload.flowUsl,
+      });
+      state.editingSpecId = null;
+      if (!state.inspect.modelName) state.inspect.modelName = payload.modelName.trim();
+      toast("기준정보가 저장되었습니다.");
+      renderSpecs();
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  document.getElementById("cancel-edit")?.addEventListener("click", () => {
+    state.editingSpecId = null;
+    renderSpecs();
+  });
+
+  document.getElementById("config-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    saveConfig({ emailRecipient: form.get("emailRecipient") });
+    toast("설정을 저장했습니다.");
+  });
+
+  document.querySelectorAll("[data-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingSpecId = button.dataset.edit;
+      renderSpecs();
+    });
+  });
+
+  document.querySelectorAll("[data-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const spec = getSpecs(true).find((item) => item.id === button.dataset.toggle);
+      setSpecActive(spec.id, !spec.active);
+      renderSpecs();
+    });
+  });
+}
+
+window.addEventListener("resize", () => {
+  if (state.page !== "inspect") return;
+  window.clearTimeout(state.resizeTimer);
+  state.resizeTimer = window.setTimeout(() => {
+    const active = document.activeElement;
+    const sample = active?.dataset?.sample;
+    const key = active?.dataset?.key;
+    renderInspect();
+    fillInspectRows();
+    if (sample != null) focusField(Number(sample), key || "current");
+    else focusFirstEmptyField();
+  }, 120);
+});
+
+document.getElementById("nav").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  state.page = button.dataset.page;
+  render();
+});
+
+function bootApp() {
+  function start() {
+    const specs = getSpecs();
+    if (!state.inspect.modelName && specs[0]) {
+      state.inspect.modelName = specs[0].modelName;
+    }
+    render();
+  }
+  if (typeof isGas === "function" && isGas()) {
+    loadGoogleData(start);
+  } else {
+    start();
+  }
+}
+
+bootApp();
+</script>
